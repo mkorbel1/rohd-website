@@ -2,7 +2,7 @@
 title: "Logical Signals"
 permalink: /docs/logical-signals/
 excerpt: "Logic signals"
-last_modified_at: 2022-12-21 
+last_modified_at: 2025-7-24 
 toc: true
 ---
 
@@ -17,6 +17,8 @@ var x = Logic();
 // an 8-bit bus named 'b'
 var bus = Logic(name: 'b', width: 8)
 ```
+
+There are other types like [`LogicArray`](https://intel.github.io/rohd/rohd/LogicArray-class.html)s and [`LogicStructure`](https://intel.github.io/rohd/rohd/LogicStructure-class.html)s which extend from `Logic`, as well.
 
 #### The value of a signal
 
@@ -37,7 +39,7 @@ x.value.toInt()
 x.value.toBigInt()
 
 // constructing a LogicValue a handful of different ways
-LogicValue.ofRadixString("31'h5761 F87A");            // 0x5761F87A
+LogicValue.ofRadixString("31'h5761_F87A");            // 0x5761F87A
 LogicValue.ofString('0101xz01');                      // 0b0101xz01
 LogicValue.of([LogicValue.one, LogicValue.zero]);     // 0b10
 [LogicValue.z, LogicValue.x].swizzle();               // 0bzx
