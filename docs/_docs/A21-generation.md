@@ -1,13 +1,17 @@
 ---
 title: "Generating Outputs"
 permalink: /docs/generation/
-last_modified_at: 2023-11-13
+last_modified_at: 2026-10-12
 toc: true
 ---
 
-Hardware in ROHD is convertible to an output format via `Synthesizer`s, the most popular of which is SystemVerilog. Hardware in ROHD can be converted to logically equivalent, human readable SystemVerilog with structure, hierarchy, ports, and names maintained.
+Hardware in ROHD is convertible to an output format via `Synthesizer`s. The
+most popular output format is SystemVerilog, with SystemC also available.
+Generated output is human-readable and maintains structure, hierarchy, ports,
+and names where the target representation supports the source semantics.
 
-The simplest way to generate SystemVerilog is with the helper method `generateSynth` in `Module`:
+The simplest way to generate SystemVerilog text is with
+`dumpSystemVerilog` on `Module`:
 
 ```dart
 void main() async {
@@ -16,17 +20,178 @@ void main() async {
     // remember that `build` returns a `Future`, hence the `await` here
     await myModule.build();
 
-    final generatedSv = myModule.generateSynth();
-
-    // you can print it out...
-    print(generatedSv);
-
-    // or write it to a file
-    File('myHardware.sv').writeAsStringSync(generatedSv);
+    final systemVerilog = myModule.dumpSystemVerilog();
+    print(systemVerilog);
 }
 ```
 
-The `generateSynth` function will return a `String` with the SystemVerilog `module` definitions for the top-level it is called on, as well as any sub-modules (recursively).  You can dump the entire contents to a file and use it anywhere you would any other SystemVerilog.
+`dumpSystemVerilog` returns one string containing the SystemVerilog `module`
+definitions for the top-level module and all recursive submodules. For
+filesystem output, use `SystemVerilogService` and explicitly write its
+artifacts:
+
+```dart
+final systemVerilog = SystemVerilogService(
+  myModule,
+  outputDirectory: 'build',
+  outputBaseName: 'myHardware',
+);
+systemVerilog.writeOutputs(); // Writes build/myHardware.sv.
+```
+
+To write one `.sv` file per module definition, configure the service with
+`multiFile: true`:
+
+```dart
+final systemVerilog = SystemVerilogService(
+  myModule,
+  outputDirectory: 'build/systemverilog',
+  multiFile: true,
+);
+systemVerilog.writeOutputs();
+```
+
+For artifact streams or other explicit output configuration, use
+`SystemVerilogService` directly.
+
+## Generating a netlist
+
+Generate a Yosys-compatible JSON netlist from a built top-level module with
+`NetlistSynthesizer` and `SynthBuilder`. `generateCombinedJson` emits one
+netlist document for the complete synthesized hierarchy. Replace `MyModule`
+with your own top-level module:
+
+```dart
+import 'dart:io';
+
+import 'package:rohd/rohd.dart';
+
+void main() async {
+  final myModule = MyModule();
+  await myModule.build();
+
+  final synthesizer = NetlistSynthesizer();
+  final builder = SynthBuilder(myModule, synthesizer);
+  final netlistJson = synthesizer.generateCombinedJson(builder, myModule);
+  print(netlistJson);
+
+  final outputFile = File('build/my_hardware.rohd.json');
+  await outputFile.parent.create(recursive: true);
+  await outputFile.writeAsString(netlistJson);
+}
+```
+
+`NetlistSynthesizerConfiguration` controls optional netlist generation
+behavior, such as slim output for hierarchy loading. The same `SynthBuilder`
+also provides individual per-module synthesis results and generated file
+contents.
+
+The JSON contains a `creator`, format `version`, and a `modules` map containing
+the complete synthesized hierarchy. Each module entry contains `attributes`,
+`ports`, `cells`, and `netnames`.
+
+## SystemC generation
+
+ROHD can also generate SystemC (C++ with the SystemC library) from the same
+hardware description. Use `SystemCService` directly for one-shot generation:
+
+```dart
+void main() async {
+    final myModule = MyModule();
+    await myModule.build();
+
+    final generatedSc =
+        SystemCService(myModule, register: false).output;
+
+    // write it to a file
+    File('myHardware.h').writeAsStringSync(generatedSc);
+
+    // Or configure artifact output and write it explicitly:
+    final systemC = SystemCService(
+        myModule,
+        register: false,
+        outputDirectory: 'build',
+        outputBaseName: 'myHardware',
+        multiFile: false);
+    systemC.writeOutputs(); // build/myHardware.sc
+}
+```
+
+The generated SystemC uses `SC_MODULE`, `SC_METHOD`, and `SC_CTHREAD`
+constructs. Combinational logic becomes `SC_METHOD` processes, compatible
+sequential logic (flip-flops and `Sequential` blocks sharing the same clock,
+reset, and reset mode) is consolidated into an `SC_CTHREAD`, and sub-modules
+are instantiated with port bindings.
+
+ROHD's emitted SystemC representation uses two-state `bool`, `sc_uint<N>`, and
+`sc_biguint<N>` types and does not preserve X/Z semantics. If any bit of a
+constant contains X or Z, the entire emitted constant becomes zero. This is a
+limitation of ROHD's emitted two-state representation, not of SystemC
+generally, so logical equivalence is limited to two-state behavior.
+
+`SystemCService` also provides per-module output, file writing, diagnostics,
+and configuration for explicitly permitted unsupported-module stubs. For
+lower-level control, use `SynthBuilder` with `SystemCSynthesizer()` directly.
+
+### SystemC vector comparisons
+
+`SimCompare.checkSystemCVector` honors explicit clock values in vectors,
+including repeated levels and cycles with no clock edge. Detected clocks that
+are omitted from every vector retain the automatic cycle-based clock.
+For reusable executables built with
+`SimCompare.buildSystemCVectorExecutable`, pass
+`drivenClockNames: {'clk'}` to drive a one-bit clock input from vectors
+instead of generating it automatically. Automatic and vector-driven clock
+configurations use separate compiled-executable cache entries.
+Passing explicit clock values to a reusable executable that still generates
+those clocks automatically is rejected instead of silently ignoring the values.
+
+## Controlling port types
+
+Generated ports default to `input logic`, `output logic`, and `inout wire`, preserving the traditional ROHD declarations. Use a `SystemVerilogSynthesizerConfiguration` to independently control whether object types, such as `wire` and `var`, and data types, such as `logic`, are explicit for each port direction.
+
+Child-driven unpacked output arrays are an exception: with the default implicit
+object type and explicit data type they use `output wire logic` to avoid
+Icarus 12.0 leaving an output variable unknown. An explicitly requested output
+object type still takes precedence.
+
+For example:
+
+```dart
+final systemVerilog = myModule.dumpSystemVerilog(
+  configuration: const SystemVerilogSynthesizerConfiguration(
+    inputPortType: SystemVerilogPortTypeConfiguration(
+      objectType: SystemVerilogPortType.explicit,
+      dataType: SystemVerilogPortType.implicit,
+    ),
+    outputPortType: SystemVerilogPortTypeConfiguration(
+      objectType: SystemVerilogPortType.implicit,
+      dataType: SystemVerilogPortType.implicit,
+    ),
+    inOutPortType: SystemVerilogPortTypeConfiguration(
+      objectType: SystemVerilogPortType.implicit,
+      dataType: SystemVerilogPortType.explicit,
+    ),
+  ),
+);
+```
+
+The same configuration can be passed directly to `SystemVerilogSynthesizer`
+when using `SynthBuilder`.
+
+## Controlling enum generation
+
+[`LogicEnum`](https://intel.github.io/rohd-website/docs/logic-enums/) signals generate SystemVerilog enum typedefs and symbolic values by default. Enum generation can be disabled for compatibility with tools or flows that require packed logic:
+
+```dart
+final generatedSv = myModule.dumpSystemVerilog(
+  configuration: const SystemVerilogSynthesizerConfiguration(
+    generateEnums: false,
+  ),
+);
+```
+
+With enum generation disabled, the same design is emitted using ordinary packed logic and numeric values.
 
 ## Controlling naming
 
@@ -38,7 +203,7 @@ Port names are always maintained exactly in generated SystemVerilog, so they mus
 
 - The `definitionName`, which maps to the name of the module declaration in SystemVerilog.
   - If you want to ensure this does not change (e.g. uniquified because multiple different declarations have the same `definitionname`), set `reserveDefinitionName` to `true`.
-- The `name`, which maps to the instance name when that instance is instanitated as a sub-module of another module.
+- The `name`, which maps to the instance name when that instance is instantiated as a sub-module of another module.
   - If you want to ensure this does not change (e.g. uniquified because other signals or sub-modules would have the same name), then set `reserveName` to `true`.
 
 ### Internal signals
@@ -46,14 +211,147 @@ Port names are always maintained exactly in generated SystemVerilog, so they mus
 Internal signals, unlike ports, don't need to always have the same exact name as in the original hardware definition.
 
 - If you do not name a signal, it will get a default name.  Generated code will attempt to avoid keeping that intermediate signal around (declared) if possible.
-- If you do name a signal, by default it will be characterized as `renameable`.  This means it will try to keep that name in generated output, but may rename it for uniqification purposes.
+- If you do name a signal, by default it will be characterized as `renameable`.  This means it will try to keep that name in generated output, but may rename it for uniquification purposes.
 - If you want to make sure an internal signal maintains exactly the name you want, you can mark it explicitly with `reserved`.
-- You can downgrade a named signal as well to `mergeable` or even `unnamed`, if you care less about it's name in generated outputs and prefer that others will take over.
+- You can downgrade a named signal as well to `mergeable` or even `unnamed`, if you care less about its name in generated outputs and prefer that others will take over.
+
+Connected, equivalent whole signals with compatible types may share one generated declaration when all their `reserved` or `renameable` names match exactly in the generated module's namespace, before uniquification. For example, three connected signals named `data`, with any combination of these two naming modes, may generate just one `data` signal. This also applies when an internal signal connects to a port named `data`; the port name and module interface remain unchanged.
+
+These modes preserve a generated name, not a separate declaration for every original signal. Structure-qualified names are compared, so matching leaf names alone are insufficient. Different preserved names remain separate, and matching names never establish connectivity: unrelated `renameable` signals are still uniquified, while unrelated `reserved` collisions still throw an exception. Partial assignments and incompatible array shapes are not eligible for this same-name merge.
 
 ### Unpreferred names
 
 The `Naming.unpreferredName` function will modify a signal name to indicate to downstream flows that the name is preferably omitted from the output, but preferable to an unnamed signal. This is generally most useful for things like output ports of `InlineSystemVerilog` modules.
 
-## More advanced generation
+## Services API
 
-Under the hood of `generateSynth`, it's actually using a [`SynthBuilder`](https://intel.github.io/rohd/rohd/SynthBuilder-class.html) which accepts a `Module` and a `Synthesizer` (usually a `SystemVerilogSynthesizer`) as arguments.  This `SynthBuilder` can provide a collection of `String` file contents via `getFileContents`, or you can ask for the full set of `synthesisResults`, which contains `SynthesisResult`s which can each be converted `toFileContents` but also has context about the `module` it refers to, the `instanceTypeName`, etc. With these APIs, you can easily generate named files, add file headers, ignore generation of some modules, generate file lists for other tools, etc.
+### Migrating legacy generation APIs
+
+`generateSynth` and `WaveDumper` remain available as deprecated compatibility
+APIs because their replacements were introduced in `0.6.11`. Prefer
+`dumpSystemVerilog`, `SystemVerilogService`, `dumpWaves`, and
+`WaveformService` for new code. Their deprecation does not imply removal in
+this `0.7.0` release.
+
+`ModuleService` is the shared API for module-scoped generation, capture, and
+inspection. Services can register with `ModuleServices` for lookup by DevTools
+and other consumers. `ArtifactProducingService` implementations expose named
+artifacts as media-typed byte streams, so consumers do not need to require a
+local output file.
+
+### Registering and discovering services
+
+Services such as `SystemVerilogService` and `WaveformService` register
+themselves by default when constructed. `ModuleServices` keeps the most recently
+registered service of each concrete type. This allows DevTools, application
+code, and other services to discover an optional capability without requiring
+the creator to pass the service instance to every consumer:
+
+```dart
+final systemVerilog = SystemVerilogService(myModule);
+
+final registeredSystemVerilog =
+    ModuleServices.instance.lookup<SystemVerilogService>();
+
+assert(identical(systemVerilog, registeredSystemVerilog));
+assert(identical(systemVerilog, SystemVerilogService.current));
+```
+
+Constructing another `SystemVerilogService` replaces the previous
+`SystemVerilogService` in the registry. Other service types remain registered.
+Use `unregister<T>()` to remove one service type or `reset()` to clear the
+registry.
+
+Registration also enables services to collaborate without directly depending
+on how the application created them. For example, a generation or capture
+service can look up an optional tracing service and include source file, line,
+and column information when tracing is available. Because a service may consult
+the registry during construction or generation, register supporting services
+before constructing the services that consume them.
+
+For one-shot work that should not change globally discoverable service state,
+set `register` to `false`:
+
+```dart
+final oneShotSystemVerilog = SystemVerilogService(
+  myModule,
+  register: false,
+);
+```
+
+`Module.dumpSystemVerilog()` is a one-shot operation and uses
+`register: false`, so it does not change globally discoverable service state.
+`Module.dumpWaves()` registers its `WaveformService` by default. Construct the
+corresponding service directly with `register: false` when registration is not
+desired.
+
+`SystemVerilogService` is the direct synthesis service. Its `outputDirectory`
+defaults to the current directory and its `outputBaseName` defaults to the top
+module's `definitionName`. The service generates output in memory; call
+`writeOutputs` only when files are required:
+
+```dart
+final service = SystemVerilogService(
+  myModule,
+  outputDirectory: 'build/netlist',
+  outputBaseName: 'accelerator',
+  configuration: const SystemVerilogSynthesizerConfiguration(),
+);
+
+// Use the generated SystemVerilog directly.
+final generatedSv = service.output;
+
+// Or inspect a transport-neutral artifact stream.
+final artifact = service.artifacts.single;
+final bytes = await artifact.openRead().expand((chunk) => chunk).toList();
+
+// Write build/netlist/accelerator.sv.
+service.writeOutputs();
+```
+
+With `multiFile: true`, `SystemVerilogService` writes one `.sv` file per
+generated module definition. For custom synthesis flows,
+[`SynthBuilder`](https://intel.github.io/rohd/rohd/SynthBuilder-class.html)
+accepts a `Module` and a `Synthesizer` (usually a
+`SystemVerilogSynthesizer`). It provides `SynthFileContents` objects through
+`getSynthFileContents`; each includes its contents, file name, and context
+about the `module` it refers to and its `instanceTypeName`. With these APIs,
+you can generate named files, add file headers, ignore generation of some
+modules, and generate file lists for other tools. `SynthBuilder.multi` makes
+it convenient to generate outputs for multiple independent hierarchies.
+
+## Capturing waveforms
+
+Use `dumpWaves` for the legacy-compatible common case of writing all simulation
+signals to a VCD file:
+
+```dart
+myModule.dumpWaves(outputPath: 'waves.vcd');
+```
+
+`WaveformService` records VCD data in memory by default and exposes it as a
+`ModuleServiceArtifact`. Its output directory and basename use the same
+defaults as other artifact-producing services. Set `writeToFile` for a
+bounded-memory file-backed capture; set `retainInMemory: true` as well only
+when that file-backed capture also needs whole-history in-memory access:
+
+```dart
+final waveform = WaveformService(
+  myModule,
+  outputDirectory: 'build/waves',
+  outputBaseName: 'interesting-signals',
+  writeToFile: true,
+  timescale: WaveformTimeScale.oneNanosecond,
+  startTime: 100,
+  stopTime: 1000,
+  signalFilter: (signal) => signal.name.startsWith('debug_'),
+);
+
+final vcdArtifact = waveform.artifacts.single;
+```
+
+`timescale` is the physical duration represented by one unit of ROHD
+simulation time. For example, `WaveformTimeScale.oneNanosecond` writes an
+event at `Simulator.time == 100` at timestamp `100` with a `1ns` timescale;
+it does not rescale timestamps or change simulator scheduling. The same
+validated scale is used for VCD and FST output.
